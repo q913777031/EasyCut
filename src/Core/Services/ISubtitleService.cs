@@ -1,9 +1,8 @@
 ﻿#nullable enable
 
-using System.Collections.Generic;
 using System.Threading.Tasks;
 
-namespace EasyCut.Core.Services
+namespace EasyCut.Services
 {
     /// <summary>
     /// 字幕服务接口
@@ -11,30 +10,23 @@ namespace EasyCut.Core.Services
     public interface ISubtitleService
     {
         /// <summary>
-        /// 尝试从视频文件中提取已有字幕（如内嵌字幕），如果不存在则返回 null
+        /// 获取英文字幕文件路径：
+        /// 默认规则：视频同目录下、同文件名的 .srt
         /// </summary>
-        Task<string?> TryExtractSubtitleAsync(string videoPath);
+        Task<string> GetEnglishSubtitleAsync(string videoPath, string outputDirectory);
 
         /// <summary>
-        /// 使用语音识别从视频中生成英文字幕文件（srt）
+        /// 根据英文字幕生成中英双语字幕（当前先做“伪中英”结构，以后替换翻译逻辑）
         /// </summary>
-        Task<string> GenerateEnglishSubtitleAsync(string videoPath);
+        Task<string> GetBilingualSubtitleAsync(string englishSubtitlePath, string outputDirectory);
 
         /// <summary>
-        /// 将英文字幕翻译为中文字幕，并返回中文字幕文件路径
+        /// 从完整字幕中裁剪出某个时间段对应的字幕文件（时间将从 0 开始重置）
         /// </summary>
-        Task<string> TranslateSubtitleToChineseAsync(string englishSubtitlePath);
-
-        /// <summary>
-        /// 合并中英字幕，生成中英双语字幕文件路径
-        /// </summary>
-        Task<string> MergeEnglishAndChineseSubtitleAsync(string englishSubtitlePath, string chineseSubtitlePath);
-
-        /// <summary>
-        /// 按分段配置切分字幕，返回每个分段对应的字幕文件路径
-        /// </summary>
-        Task<IReadOnlyList<string>> SplitSubtitleBySegmentsAsync(
-            string subtitlePath,
-            IReadOnlyList<Models.SegmentConfig> segments);
+        Task<string> CreateSegmentSubtitleAsync(
+            string sourceSubtitlePath,
+            double segmentStartSeconds,
+            double segmentEndSeconds,
+            string outputSubtitlePath);
     }
 }

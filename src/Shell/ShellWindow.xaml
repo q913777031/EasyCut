@@ -51,7 +51,9 @@
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>
-
+                <DataGridTextColumn Header="输出文件"
+                    Binding="{Binding OutputFilePath}"
+                    Width="2*" />
                 <DataGridTextColumn Header="输出目录" Binding="{Binding OutputDirectory}" Width="2*" />
                 <DataGridTextColumn Header="创建时间" Binding="{Binding CreatedTime}" Width="*" />
                 <DataGridTextColumn Header="最后更新" Binding="{Binding UpdatedTime}" Width="*" />

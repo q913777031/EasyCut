@@ -40,6 +40,11 @@ namespace EasyCut.Models
         public int Progress { get; set; }
 
         /// <summary>
+        /// 最终生成的视频完整路径（成功时写入）
+        /// </summary>
+        public string? OutputFilePath { get; set; }
+
+        /// <summary>
         /// 错误信息
         /// </summary>
         public string? ErrorMessage { get; set; }
