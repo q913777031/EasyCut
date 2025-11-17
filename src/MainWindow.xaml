@@ -1,0 +1,71 @@
+﻿<Window x:Class="EasyCut.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:prism="http://prismlibrary.com/"
+        mc:Ignorable="d"
+        prism:ViewModelLocator.AutoWireViewModel="True"
+        Title="EasyCut - 英语电影学习剪辑" Height="450" Width="800">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 视频与字幕选择区域 -->
+        <StackPanel Orientation="Vertical" Grid.Row="0" Margin="0,0,0,10">
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="视频文件：" VerticalAlignment="Center" Width="80" />
+                <TextBox Text="{Binding VideoPath, UpdateSourceTrigger=PropertyChanged}" Width="550" Margin="5,0,5,0" />
+                <Button Content="浏览" Command="{Binding BrowseVideoCommand}" Width="80" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="英文字幕：" VerticalAlignment="Center" Width="80" />
+                <TextBox Text="{Binding EnglishSubtitlePath, UpdateSourceTrigger=PropertyChanged}" Width="550" Margin="5,0,5,0" />
+                <Button Content="浏览" Command="{Binding BrowseEnglishSubtitleCommand}" Width="80" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="中英字幕：" VerticalAlignment="Center" Width="80" />
+                <TextBox Text="{Binding BilingualSubtitlePath, UpdateSourceTrigger=PropertyChanged}" Width="550" Margin="5,0,5,0" />
+                <Button Content="浏览" Command="{Binding BrowseBilingualSubtitleCommand}" Width="80" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- 时间设置区域 -->
+        <StackPanel Orientation="Horizontal" Grid.Row="1" Margin="0,0,0,10">
+            <TextBlock Text="开始时间 (HH:MM:SS)：" VerticalAlignment="Center" />
+            <TextBox Text="{Binding StartText, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="5,0,20,0" />
+            <TextBlock Text="结束时间 (HH:MM:SS)：" VerticalAlignment="Center" />
+            <TextBox Text="{Binding EndText, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="5,0,0,0" />
+        </StackPanel>
+
+        <!-- 输出文件设置区域 -->
+        <StackPanel Orientation="Horizontal" Grid.Row="2" Margin="0,0,0,10">
+            <TextBlock Text="输出文件：" VerticalAlignment="Center" Width="80" />
+            <TextBox Text="{Binding OutputPath, UpdateSourceTrigger=PropertyChanged}" Width="550" Margin="5,0,5,0" />
+            <Button Content="选择" Command="{Binding BrowseOutputCommand}" Width="80" />
+        </StackPanel>
+
+        <!-- 日志显示区域 -->
+        <TextBox Grid.Row="3"
+                 Text="{Binding LogText}"
+                 IsReadOnly="True"
+                 TextWrapping="Wrap"
+                 VerticalScrollBarVisibility="Auto"
+                 AcceptsReturn="True" />
+
+        <!-- 操作按钮区域 -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <Button Content="生成学习视频"
+                    Width="150"
+                    IsEnabled="{Binding IsNotBusy}"
+                    Command="{Binding GenerateCommand}" />
+        </StackPanel>
+    </Grid>
+</Window>
