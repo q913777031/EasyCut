@@ -1,8 +1,10 @@
-﻿using Prism.Ioc;
-using Prism.Unity;
+﻿using System.ComponentModel;
 using System.Windows;
+using EasyCut.Shell;
+using EasyCut.Shell.Views;
 using EasyCut.Views;
-using System.ComponentModel;
+using Prism.Ioc;
+using Prism.Unity;
 
 namespace EasyCut
 {
@@ -17,7 +19,7 @@ namespace EasyCut
         /// <returns>主窗口对象。</returns>
         protected override Window CreateShell()
         {
-            return Container.Resolve<MainWindow>();
+            return Container.Resolve<ShellWindow>();
         }
 
         /// <summary>
@@ -26,7 +28,10 @@ namespace EasyCut
         /// <param name="containerRegistry">容器注册器。</param>
         protected override void RegisterTypes(IContainerRegistry containerRegistry)
         {
-            containerRegistry.RegisterSingleton<Services.FfmpegService>();
+            containerRegistry.RegisterForNavigation<VideoTaskListView>("VideoTaskList");
+            containerRegistry.RegisterSingleton<Services.IVideoTaskRepository, Services.InMemoryVideoTaskRepository>();
+            containerRegistry.RegisterSingleton<Services.IVideoTaskCoordinator, Services.VideoTaskCoordinator>();
+            containerRegistry.RegisterSingleton<ViewModels.VideoTaskListViewModel>();
         }
     }
 }
