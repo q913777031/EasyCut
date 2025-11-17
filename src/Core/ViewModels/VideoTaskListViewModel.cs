@@ -2,10 +2,12 @@
 
 using System;
 using System.Collections.ObjectModel;
-using Prism.Commands;
-using Prism.Mvvm;
+using System.Diagnostics;
+using System.Windows;
 using EasyCut.Models;
 using EasyCut.Services;
+using Prism.Commands;
+using Prism.Mvvm;
 
 namespace EasyCut.ViewModels
 {
@@ -50,6 +52,8 @@ namespace EasyCut.ViewModels
             _coordinator = coordinator;
             NewTaskCommand = new DelegateCommand(OnNewTask);
             RefreshCommand = new DelegateCommand(OnRefresh);
+            OpenOutputFolderCommand = new DelegateCommand(OnOpenOutputFolder, CanOpenOutputFolder)
+    .ObservesProperty(() => SelectedTask);
         }
 
         private async void OnNewTask()
@@ -71,6 +75,14 @@ namespace EasyCut.ViewModels
             var task = await _coordinator.CreateAndRunTaskAsync(videoPath, outputDir);
             Tasks.Add(task);
             SelectedTask = task;
+            if (task.Status == VideoTaskStatus.Failed)
+            {
+                System.Windows.MessageBox.Show(
+                    task.ErrorMessage ?? "未知错误",
+                    "剪辑失败",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
         }
 
         private async void OnRefresh()
@@ -86,6 +98,30 @@ namespace EasyCut.ViewModels
                     current.ErrorMessage = latest.ErrorMessage;
                     current.UpdatedTime = latest.UpdatedTime;
                 }
+            }
+        }
+
+        public DelegateCommand OpenOutputFolderCommand { get; }
+
+        private bool CanOpenOutputFolder()
+        {
+            return SelectedTask != null
+                   && !string.IsNullOrWhiteSpace(SelectedTask.OutputDirectory)
+                   && System.IO.Directory.Exists(SelectedTask.OutputDirectory);
+        }
+
+        private void OnOpenOutputFolder()
+        {
+            if (SelectedTask == null) return;
+
+            var dir = SelectedTask.OutputDirectory;
+            if (System.IO.Directory.Exists(dir))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = dir,
+                    UseShellExecute = true
+                });
             }
         }
     }

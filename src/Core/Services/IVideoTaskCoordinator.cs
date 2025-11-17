@@ -2,7 +2,6 @@
 
 using System;
 using System.Threading.Tasks;
-using EasyCut.Core.Models;
 using EasyCut.Models;
 
 namespace EasyCut.Core.Services

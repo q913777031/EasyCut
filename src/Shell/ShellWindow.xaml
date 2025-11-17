@@ -16,6 +16,11 @@
             <Button Content="新建任务"
                     Command="{Binding NewTaskCommand}"
                     Style="{DynamicResource MaterialDesignRaisedButton}" />
+            <Button Content="打开输出目录"
+        Margin="8,0,0,0"
+        Command="{Binding OpenOutputFolderCommand}"
+        Style="{DynamicResource MaterialDesignFlatButton}" />
+
             <Button Content="刷新"
                     Margin="8,0,0,0"
                     Command="{Binding RefreshCommand}"
@@ -24,14 +29,30 @@
 
         <!-- 任务列表 -->
         <DataGrid Grid.Row="1"
-                  ItemsSource="{Binding Tasks}"
-                  SelectedItem="{Binding SelectedTask}"
-                  AutoGenerateColumns="False"
-                  IsReadOnly="True">
+          ItemsSource="{Binding Tasks}"
+          SelectedItem="{Binding SelectedTask}"
+          AutoGenerateColumns="False"
+          IsReadOnly="True">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="2*" />
                 <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="*" />
-                <DataGridTextColumn Header="进度" Binding="{Binding Progress}" Width="*" />
+                <DataGridTextColumn Header="错误信息"
+                            Binding="{Binding ErrorMessage}"
+                            Width="3*" />
+
+                <!-- 进度条列 -->
+                <DataGridTemplateColumn Header="进度" Width="1.5*">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <ProgressBar Minimum="0"
+                                 Maximum="100"
+                                 Height="16"
+                                 Value="{Binding Progress}" />
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTextColumn Header="输出目录" Binding="{Binding OutputDirectory}" Width="2*" />
                 <DataGridTextColumn Header="创建时间" Binding="{Binding CreatedTime}" Width="*" />
                 <DataGridTextColumn Header="最后更新" Binding="{Binding UpdatedTime}" Width="*" />
             </DataGrid.Columns>

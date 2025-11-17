@@ -2,10 +2,10 @@
 
 using System;
 
-namespace EasyCut.Core.Models
+namespace EasyCut.Models
 {
     /// <summary>
-    /// 单个视频分段配置
+    /// 视频分段配置
     /// </summary>
     public class SegmentConfig
     {
@@ -23,15 +23,10 @@ namespace EasyCut.Core.Models
         /// 结束时间（秒）
         /// </summary>
         public double EndSeconds { get; set; }
-
-        /// <summary>
-        /// 字幕模式
-        /// </summary>
-        public SubtitleMode SubtitleMode { get; set; }
     }
 
     /// <summary>
-    /// 字幕模式枚举
+    /// 字幕模式（为后续扩展预留，目前可以不用）
     /// </summary>
     public enum SubtitleMode
     {
