@@ -85,30 +85,34 @@ namespace EasyCut.Services
 
         /// <inheritdoc />
         public async Task<IReadOnlyList<string>> SplitVideoAsync(
-            string videoPath,
-            IReadOnlyList<SegmentConfig> segments,
-            string outputDirectory)
+     string videoPath,
+     IReadOnlyList<SegmentConfig> segments,
+     string outputDirectory)
         {
             if (segments is null || segments.Count == 0)
-            {
                 throw new ArgumentException("分段配置不能为空。", nameof(segments));
-            }
 
             Directory.CreateDirectory(outputDirectory);
+
             var result = new List<string>();
 
-            for (int i = 0; i < segments.Count; i++)
+            foreach (var segment in segments)
             {
-                var segment = segments[i];
                 string segmentFileName = $"{Path.GetFileNameWithoutExtension(videoPath)}_Part{segment.Index}.mp4";
                 string segmentPath = Path.Combine(outputDirectory, segmentFileName);
 
-                string start = ToTimeString(segment.StartSeconds);
                 double durationSeconds = Math.Max(segment.EndSeconds - segment.StartSeconds, 0.1);
+                string start = ToTimeString(segment.StartSeconds);
                 string duration = ToTimeString(durationSeconds);
 
-                // -ss 起始时间，-t 时长，-c copy 表示不重新编码（更快）
-                string args = $"-y -ss {start} -i \"{videoPath}\" -t {duration} -c copy \"{segmentPath}\"";
+                // 统一重编码 + 重置时间戳 + 音频转为 2 声道
+                string args =
+                    $"-y -ss {start} -i \"{videoPath}\" " +
+                    $"-t {duration} " +
+                    "-c:v libx264 -preset veryfast -crf 20 " +
+                    "-c:a aac -ac 2 -b:a 192k " +
+                    "-reset_timestamps 1 " +
+                    $"\"{segmentPath}\"";
 
                 await RunFfmpegAsync(args, outputDirectory).ConfigureAwait(false);
 
@@ -118,6 +122,7 @@ namespace EasyCut.Services
             return result;
         }
 
+        /// <inheritdoc />
         /// <inheritdoc />
         public async Task<string> MergeSegmentsAsync(
             IReadOnlyList<string> segmentVideoPaths,
@@ -137,33 +142,48 @@ namespace EasyCut.Services
             foreach (var path in segmentVideoPaths)
             {
                 if (string.IsNullOrWhiteSpace(path))
-                {
                     continue;
-                }
 
                 string fullPath = Path.GetFullPath(path);
                 string normalizedPath = fullPath.Replace("\\", "/").Replace("'", "''");
                 sb.AppendLine($"file '{normalizedPath}'");
             }
 
-            // 使用 UTF-8 无 BOM，避免 ffmpeg concat 解析到 BOM 报错
             var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
             await File.WriteAllTextAsync(listFilePath, sb.ToString(), utf8NoBom).ConfigureAwait(false);
 
             string outputPath = Path.Combine(outputDirectory, outputFileName);
 
-            string args = $"-y -f concat -safe 0 -i \"{listFilePath}\" -c copy \"{outputPath}\"";
+            // 关键：统一重编码，避免后面片段音画不同步
+            string args =
+        $"-y -f concat -safe 0 -i \"{listFilePath}\" " +
+        "-c:v libx264 -preset veryfast -crf 20 " +
+        "-c:a aac -ac 2 -b:a 192k " +   // 关键：强制转为 2 声道
+        $"\"{outputPath}\"";
 
             await RunFfmpegAsync(args, outputDirectory).ConfigureAwait(false);
+
+            // concat_list 只是临时文件，合并完成就删
+            try
+            {
+                if (File.Exists(listFilePath))
+                {
+                    File.Delete(listFilePath);
+                }
+            }
+            catch
+            {
+                // 删除失败可以忽略
+            }
 
             return outputPath;
         }
 
         /// <inheritdoc />
         public async Task<string> ExtractAudioAsync(
-            string videoPath,
-            string outputDirectory,
-            string baseFileName)
+                string videoPath,
+                string outputDirectory,
+                string baseFileName)
         {
             if (string.IsNullOrWhiteSpace(videoPath))
             {
@@ -181,11 +201,15 @@ namespace EasyCut.Services
                 ? Path.GetFileNameWithoutExtension(videoPath)
                 : baseFileName;
 
-            string audioPath = Path.Combine(outputDirectory, $"{safeBaseName}_16k_mono.wav");
+            string audioPath = Path.Combine(outputDirectory, $"{safeBaseName}_16k_mono_60s.wav");
 
-            // 抽取音频为 16k 单声道 PCM wav（Whisper 推荐输入）
+            // 关键：只抽取前 60 秒音频，加快 Whisper 处理
+            // -i 输入视频，-vn 去掉视频流，-ar 16000 / -ac 1 适配 Whisper，-t 60 只保留 60 秒
             string args =
-                $"-y -i \"{videoPath}\" -vn -acodec pcm_s16le -ar 16000 -ac 1 \"{audioPath}\"";
+                $"-y -i \"{videoPath}\" " +
+                "-vn -acodec pcm_s16le -ar 16000 -ac 1 " +
+                "-t 60 " +
+                $"\"{audioPath}\"";
 
             await RunFfmpegAsync(args, outputDirectory).ConfigureAwait(false);
 

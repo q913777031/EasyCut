@@ -15,130 +15,66 @@ namespace EasyCut.Services
     /// </summary>
     public sealed class WhisperSubtitleGenerator : ISubtitleGenerator
     {
-        /// <summary>
-        /// 默认模型类型（Base 英文模型）
-        /// </summary>
-        private const GgmlType DefaultModelType = GgmlType.BaseEn;
-
-        /// <summary>
-        /// 默认模型文件名
-        /// </summary>
-        private const string DefaultModelFileName = "ggml-base.en.bin";
-
-        /// <summary>
-        /// 模型文件完整路径
-        /// </summary>
         private readonly string _modelFilePath;
 
-        /// <summary>
-        /// 识别语言（"en" 或 "auto"）
-        /// </summary>
-        private readonly string _language;
-
-        /// <summary>
-        /// 构造函数（使用默认 Models 目录、BaseEn 模型、英文）
-        /// </summary>
         public WhisperSubtitleGenerator()
-            : this(
-                  modelDirectory: Path.Combine(AppContext.BaseDirectory, "Models"),
-                  modelType: DefaultModelType,
-                  modelFileName: DefaultModelFileName,
-                  language: "en")
         {
+            _modelFilePath = Path.Combine(
+                AppContext.BaseDirectory,
+                "Models",
+                "ggml-base.en.bin");
         }
 
         /// <summary>
-        /// 自定义模型目录、类型、文件名和语言的构造函数。
+        /// 将 wav 音频直接转成英文字幕条目（不落地文件）。
         /// </summary>
-        public WhisperSubtitleGenerator(
-            string modelDirectory,
-            GgmlType modelType,
-            string modelFileName,
-            string language = "en")
-        {
-            if (string.IsNullOrWhiteSpace(modelDirectory))
-            {
-                throw new ArgumentException("模型目录不能为空。", nameof(modelDirectory));
-            }
-
-            if (string.IsNullOrWhiteSpace(modelFileName))
-            {
-                throw new ArgumentException("模型文件名不能为空。", nameof(modelFileName));
-            }
-
-            Directory.CreateDirectory(modelDirectory);
-
-            ModelType = modelType;
-            _modelFilePath = Path.Combine(modelDirectory, modelFileName);
-            _language = string.IsNullOrWhiteSpace(language) ? "auto" : language;
-        }
-
-        /// <summary>
-        /// 当前模型类型（可用于日志）
-        /// </summary>
-        public GgmlType ModelType { get; }
-
-        /// <inheritdoc />
         public async Task<IReadOnlyList<SrtEntry>> TranscribeAsync(
-            string wavFilePath,
-            CancellationToken cancellationToken = default)
+      string wavFilePath,
+      CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(wavFilePath))
-            {
                 throw new ArgumentException("音频路径不能为空。", nameof(wavFilePath));
-            }
 
             if (!File.Exists(wavFilePath))
-            {
                 throw new FileNotFoundException("找不到音频文件。", wavFilePath);
-            }
 
             await EnsureModelExistsAsync(cancellationToken).ConfigureAwait(false);
 
             var entries = new List<SrtEntry>();
 
-            using var whisperFactory = WhisperFactory.FromPath(_modelFilePath);
+            using var factory = WhisperFactory.FromPath(_modelFilePath);
 
-            using var processor = whisperFactory.CreateBuilder()
-                .WithLanguage(_language)   // "en" 或 "auto"
-                .Build();
+            var builder = factory.CreateBuilder()
+                .WithLanguage("en");    // 只识别英文，不做翻译
+
+            using var processor = builder.Build();
 
             using var fileStream = File.OpenRead(wavFilePath);
 
-            await foreach (var result in processor.ProcessAsync(fileStream).ConfigureAwait(false))
+            await foreach (var result in processor
+                               .ProcessAsync(fileStream)
+                               .WithCancellation(cancellationToken))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
                 string text = result.Text?.Trim() ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(text))
-                {
                     continue;
-                }
-
-                // Whisper.net 的 Start / End 为 TimeSpan（新版）
-                TimeSpan start = result.Start;
-                TimeSpan end = result.End;
-
-                if (end <= start)
-                {
-                    end = start + TimeSpan.FromMilliseconds(500);
-                }
 
                 var entry = new SrtEntry
                 {
                     Index = entries.Count + 1,
-                    Start = start,
-                    End = end
+                    Start = result.Start,
+                    End = result.End
                 };
                 entry.Lines.Add(text);
-
                 entries.Add(entry);
             }
 
             return entries;
         }
 
-        /// <inheritdoc />
+        /// <summary>
+        /// 生成英文字幕和中英字幕 SRT 文件。
+        /// </summary>
         public async Task<(string englishSrtPath, string bilingualSrtPath)> GenerateEnglishAndBilingualSrtAsync(
             string wavFilePath,
             string outputDirectory,
@@ -147,17 +83,15 @@ namespace EasyCut.Services
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(outputDirectory))
-            {
                 throw new ArgumentException("输出目录不能为空。", nameof(outputDirectory));
-            }
 
             Directory.CreateDirectory(outputDirectory);
 
-            var entries = await TranscribeAsync(wavFilePath, cancellationToken).ConfigureAwait(false);
-            if (entries.Count == 0)
-            {
+            var englishEntries = await TranscribeAsync(wavFilePath, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (englishEntries.Count == 0)
                 throw new InvalidOperationException("未识别到任何语音内容，无法生成字幕。");
-            }
 
             string safeBaseName = string.IsNullOrWhiteSpace(baseFileName)
                 ? Path.GetFileNameWithoutExtension(wavFilePath)
@@ -166,101 +100,108 @@ namespace EasyCut.Services
             string englishPath = Path.Combine(outputDirectory, $"{safeBaseName}.en.srt");
             string bilingualPath = Path.Combine(outputDirectory, $"{safeBaseName}.en-zh.srt");
 
-            // 英文字幕文件
-            await SrtHelper.WriteAsync(englishPath, entries).ConfigureAwait(false);
+            // 英文字幕：直接写
+            await SrtHelper.WriteAsync(englishPath, englishEntries)
+                .ConfigureAwait(false);
 
-            // 中英字幕文件（第二行中文，先用翻译函数占位）
-            var bilingualEntries = new List<SrtEntry>();
+            IReadOnlyList<SrtEntry> bilingualEntries;
 
-            foreach (var entry in entries)
+            if (translateAsync is null)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                string englishText = string.Join(" ", entry.Lines).Trim();
-                if (string.IsNullOrWhiteSpace(englishText))
-                {
-                    continue;
-                }
-
-                string chineseText = await TranslateOrFallbackAsync(
-                    englishText,
-                    translateAsync,
-                    cancellationToken).ConfigureAwait(false);
-
-                var newEntry = new SrtEntry
-                {
-                    Index = bilingualEntries.Count + 1,
-                    Start = entry.Start,
-                    End = entry.End
-                };
-                newEntry.Lines.Add(englishText);
-                newEntry.Lines.Add(chineseText);
-
-                bilingualEntries.Add(newEntry);
-            }
-
-            if (bilingualEntries.Count == 0)
-            {
-                await SrtHelper.WriteAsync(bilingualPath, entries).ConfigureAwait(false);
+                // 没有翻译函数时，【不再重复两行英文】，
+                // 直接用英文字幕（单行英文）作为“中英字幕”占位。
+                bilingualEntries = englishEntries;
             }
             else
             {
-                await SrtHelper.WriteAsync(bilingualPath, bilingualEntries).ConfigureAwait(false);
+                // 有翻译函数时，生成“英文 + 中文”两行
+                bilingualEntries = await ToBilingualAsync(
+                        englishEntries,
+                        translateAsync,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
+
+            await SrtHelper.WriteAsync(bilingualPath, bilingualEntries)
+                .ConfigureAwait(false);
 
             return (englishPath, bilingualPath);
         }
 
         /// <summary>
-        /// 确保本地模型文件存在，不存在则从 Hugging Face 自动下载。
+        /// 将英文字幕转为中英双语（英文 + 中文两行）。
         /// </summary>
-        private async Task EnsureModelExistsAsync(CancellationToken cancellationToken)
+        private static async Task<IReadOnlyList<SrtEntry>> ToBilingualAsync(
+            IReadOnlyList<SrtEntry> englishEntries,
+            Func<string, Task<string>> translateAsync,
+            CancellationToken cancellationToken)
         {
-            if (File.Exists(_modelFilePath))
+            var result = new List<SrtEntry>(englishEntries.Count);
+
+            foreach (var e in englishEntries)
             {
-                return;
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string english = string.Join(" ", e.Lines).Trim();
+                if (string.IsNullOrWhiteSpace(english))
+                    continue;
+
+                string chinese = await translateAsync(english).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(chinese))
+                    chinese = english; // 翻译失败时退回英文
+
+                var entry = new SrtEntry
+                {
+                    Index = result.Count + 1,
+                    Start = e.Start,
+                    End = e.End
+                };
+
+                entry.Lines.Add(english);
+                entry.Lines.Add(chinese);
+
+                result.Add(entry);
             }
 
-            Directory.CreateDirectory(Path.GetDirectoryName(_modelFilePath)!);
-
-            using var modelStream = await WhisperGgmlDownloader.Default
-                .GetGgmlModelAsync(ModelType, cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
-
-            using var fileWriter = File.OpenWrite(_modelFilePath);
-            await modelStream.CopyToAsync(fileWriter, cancellationToken).ConfigureAwait(false);
+            return result;
         }
 
         /// <summary>
-        /// 翻译英文文本为中文；如未提供翻译函数或翻译失败，则回退为英文。
+        /// 确保 ggml 模型存在，不存在则自动下载。
         /// </summary>
-        private static async Task<string> TranslateOrFallbackAsync(
-            string english,
-            Func<string, Task<string>>? translateAsync,
-            CancellationToken cancellationToken)
+        private async Task EnsureModelExistsAsync(CancellationToken cancellationToken)
         {
-            if (translateAsync is null)
+            string? dir = Path.GetDirectoryName(_modelFilePath);
+            if (!string.IsNullOrEmpty(dir))
             {
-                // 当前先直接返回英文；后续可接入任意 AI / 翻译服务。
-                return english;
+                Directory.CreateDirectory(dir);
             }
 
-            try
-            {
-                string result = await translateAsync(english).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
+            bool needDownload = true;
 
-                if (!string.IsNullOrWhiteSpace(result))
+            if (File.Exists(_modelFilePath))
+            {
+                var fi = new FileInfo(_modelFilePath);
+                if (fi.Length > 50_000_000)
                 {
-                    return result.Trim();
+                    needDownload = false;
+                }
+                else
+                {
+                    try { File.Delete(_modelFilePath); } catch { }
                 }
             }
-            catch
-            {
-                // 忽略翻译异常
-            }
 
-            return english;
+            if (!needDownload)
+                return;
+
+            using var modelStream = await WhisperGgmlDownloader.Default
+                .GetGgmlModelAsync(GgmlType.BaseEn)
+                .ConfigureAwait(false);
+
+            using var fileWriter = File.OpenWrite(_modelFilePath);
+            await modelStream.CopyToAsync(fileWriter, cancellationToken)
+                .ConfigureAwait(false);
         }
     }
 }

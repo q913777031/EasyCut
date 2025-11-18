@@ -9,35 +9,28 @@ namespace EasyCut.Models
     /// </summary>
     public class VideoTask
     {
-        /// <summary>
-        /// 任务 Id
-        /// </summary>
         public Guid Id { get; set; }
 
-        /// <summary>
-        /// 输入视频完整路径
-        /// </summary>
         public string InputVideoPath { get; set; } = string.Empty;
 
-        /// <summary>
-        /// 输出目录
-        /// </summary>
         public string OutputDirectory { get; set; } = string.Empty;
 
-        /// <summary>
-        /// 任务名称
-        /// </summary>
         public string Name { get; set; } = string.Empty;
 
         /// <summary>
-        /// 当前状态
+        /// 当前状态（等待/处理中/完成/失败）
         /// </summary>
         public VideoTaskStatus Status { get; set; }
 
         /// <summary>
-        /// 进度百分比（0-100）
+        /// 总体进度百分比（0-100）
         /// </summary>
         public int Progress { get; set; }
+
+        /// <summary>
+        /// 当前处理阶段
+        /// </summary>
+        public VideoTaskPhase Phase { get; set; } = VideoTaskPhase.Pending;
 
         /// <summary>
         /// 最终生成的视频完整路径（成功时写入）
@@ -49,40 +42,75 @@ namespace EasyCut.Models
         /// </summary>
         public string? ErrorMessage { get; set; }
 
-        /// <summary>
-        /// 创建时间
-        /// </summary>
         public DateTime CreatedTime { get; set; }
 
-        /// <summary>
-        /// 最后更新时间
-        /// </summary>
         public DateTime UpdatedTime { get; set; }
+
+        /// <summary>
+        /// 阶段显示名称（方便 XAML 直接绑定）
+        /// </summary>
+        public string PhaseDisplay =>
+            Phase switch
+            {
+                VideoTaskPhase.Pending => "等待中",
+                VideoTaskPhase.ExtractingAudio => "抽取音频",
+                VideoTaskPhase.GeneratingSubtitles => "生成字幕",
+                VideoTaskPhase.SplittingVideo => "切分视频",
+                VideoTaskPhase.BurningSubtitlePart2 => "烧入英文字幕（第2段）",
+                VideoTaskPhase.BurningSubtitlePart3 => "烧入中英字幕（第3段）",
+                VideoTaskPhase.MergingSegments => "合并视频",
+                VideoTaskPhase.Completed => "完成",
+                VideoTaskPhase.Failed => "失败",
+                _ => "未知"
+            };
+    }
+
+    public enum VideoTaskStatus
+    {
+        Pending,
+        Processing,
+        Completed,
+        Failed
     }
 
     /// <summary>
-    /// 视频任务状态
+    /// 细分阶段
     /// </summary>
-    public enum VideoTaskStatus
+    public enum VideoTaskPhase
     {
-        /// <summary>
-        /// 等待中
-        /// </summary>
-        Pending,
+        Pending = 0,
 
         /// <summary>
-        /// 处理中
+        /// 抽取音频
         /// </summary>
-        Processing,
+        ExtractingAudio,
 
         /// <summary>
-        /// 已完成
+        /// Whisper 生成字幕
         /// </summary>
+        GeneratingSubtitles,
+
+        /// <summary>
+        /// 切分视频为四段
+        /// </summary>
+        SplittingVideo,
+
+        /// <summary>
+        /// 第 2 段烧入英文字幕
+        /// </summary>
+        BurningSubtitlePart2,
+
+        /// <summary>
+        /// 第 3 段烧入中英字幕
+        /// </summary>
+        BurningSubtitlePart3,
+
+        /// <summary>
+        /// 合并四段
+        /// </summary>
+        MergingSegments,
+
         Completed,
-
-        /// <summary>
-        /// 失败
-        /// </summary>
         Failed
     }
 }

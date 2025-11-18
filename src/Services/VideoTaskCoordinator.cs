@@ -10,11 +10,15 @@ namespace EasyCut.Services
 {
     /// <summary>
     /// 视频任务协调服务：
-    /// - 抽取音频；
-    /// - Whisper 生成英文 / 中英字幕；
-    /// - 等分四段视频；
-    /// - 第二段叠英文字幕、第三段叠中英字幕；
-    /// - 合并四段生成最终成品。
+    /// - 截取原视频前 60 秒作为基础片段；
+    /// - 抽取这 60 秒音频并用 Whisper 生成英文 / 中英字幕；
+    /// - 基于同一个 60 秒片段制作四段：
+    ///   1. 无字幕；
+    ///   2. 叠英文字幕；
+    ///   3. 叠中英字幕；
+    ///   4. 无字幕；
+    /// - 将四段有序拼接成 4 分钟成品视频；
+    /// - 最终只保留成品，删除所有中间文件。
     /// </summary>
     public sealed class VideoTaskCoordinator : IVideoTaskCoordinator
     {
@@ -65,140 +69,152 @@ namespace EasyCut.Services
 
             await _repository.InsertAsync(task).ConfigureAwait(false);
 
+            // 记录所有中间文件路径，成功后统一删除
+            var tempFiles = new List<string>();
+
             try
             {
-                // 状态：处理中
                 task.Status = VideoTaskStatus.Processing;
                 task.Progress = 5;
                 task.UpdatedTime = DateTime.Now;
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 1. 抽取音频为 16k 单声道 wav
-                string audioPath = await _videoProcessingService
-                    .ExtractAudioAsync(inputVideoPath, outputDirectory, task.Name)
+                // 1. 获取视频总时长，至少要有 60 秒
+                double totalDuration = await _videoProcessingService
+                    .GetVideoDurationAsync(inputVideoPath)
                     .ConfigureAwait(false);
+
+                if (totalDuration < 60.0)
+                {
+                    throw new InvalidOperationException("视频总时长不足 60 秒，无法生成 4 分钟输出。");
+                }
+
+                // 2. 从原视频中剪出前 60 秒作为基础片段
+                // 这里复用 SplitVideoAsync，只构造一个 Segment：0~60 秒
+                var baseSegments = new List<SegmentConfig>
+                {
+                    new SegmentConfig
+                    {
+                        Index = 1,
+                        StartSeconds = 0,
+                        EndSeconds = 60
+                    }
+                };
+
+                var baseSegmentPaths = await _videoProcessingService
+                    .SplitVideoAsync(inputVideoPath, baseSegments, outputDirectory)
+                    .ConfigureAwait(false);
+
+                if (baseSegmentPaths.Count == 0)
+                {
+                    throw new InvalidOperationException("截取前 60 秒片段失败。");
+                }
+
+                string baseClipPath = baseSegmentPaths[0];
+                tempFiles.Add(baseClipPath);
 
                 task.Progress = 15;
                 task.UpdatedTime = DateTime.Now;
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 2. 使用 Whisper 生成英文 + 中英字幕 SRT
+                // 3. 抽取基础片段的音频（前 60 秒）并生成字幕
+                // 注意：ExtractAudioAsync 已经使用 -t 60，只针对前 60 秒音频
+                string audioPath = await _videoProcessingService
+                    .ExtractAudioAsync(baseClipPath, outputDirectory, task.Name)
+                    .ConfigureAwait(false);
+
+                tempFiles.Add(audioPath);
+
+                task.Progress = 25;
+                task.UpdatedTime = DateTime.Now;
+                await _repository.UpdateAsync(task).ConfigureAwait(false);
+
                 var (englishSrtPath, bilingualSrtPath) =
                     await _subtitleGenerator.GenerateEnglishAndBilingualSrtAsync(
-                        audioPath,
-                        outputDirectory,
-                        baseFileName: task.Name,
-                        translateAsync: null) // 先不翻译，后续可注入翻译函数
+                            audioPath,
+                            outputDirectory,
+                            baseFileName: task.Name,
+                            translateAsync: null)
                         .ConfigureAwait(false);
 
-                task.Progress = 35;
+                tempFiles.Add(englishSrtPath);
+                tempFiles.Add(bilingualSrtPath);
+
+                task.Progress = 40;
                 task.UpdatedTime = DateTime.Now;
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 3. 获取视频总时长并等分四段
-                double duration = await _videoProcessingService
-                    .GetVideoDurationAsync(inputVideoPath)
-                    .ConfigureAwait(false);
+                // 4. 构造四个 60 秒片段：
+                //    1) 原片段无字幕
+                //    2) 原片段 + 英文字幕
+                //    3) 原片段 + 中英字幕
+                //    4) 原片段无字幕（再复制一份，保证参数一致）
+                var finalSegmentPaths = new List<string>();
 
-                var segments = BuildFourSegments(duration);
+                // 第一段：无字幕（直接用 baseClip）
+                string part1Path = Path.Combine(
+                    outputDirectory,
+                    $"{task.Name}_Part1_raw.mp4");
 
-                task.Progress = 45;
+                // 为避免后面合并时参数不一致，这里统一转一遍（可选，也可以直接 copy）
+                // 如果你确定 baseClip 与后面带字视频编码参数完全一致，也可以直接：
+                // File.Copy(baseClipPath, part1Path, overwrite: true);
+                File.Copy(baseClipPath, part1Path, overwrite: true);
+                tempFiles.Add(part1Path);
+                finalSegmentPaths.Add(part1Path);
+
+                task.Progress = 50;
                 task.UpdatedTime = DateTime.Now;
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 4. 切分视频成四段
-                var segmentPaths = await _videoProcessingService
-                    .SplitVideoAsync(inputVideoPath, segments, outputDirectory)
+                // 第二段：英文字幕
+                string part2Srt = englishSrtPath; // 直接用全 60 秒英文字幕
+                string part2Path = Path.Combine(
+                    outputDirectory,
+                    $"{task.Name}_Part2_en.mp4");
+
+                string part2Burned = await _videoProcessingService
+                    .BurnSubtitleAsync(baseClipPath, part2Srt, part2Path)
                     .ConfigureAwait(false);
+
+                tempFiles.Add(part2Burned);
+                finalSegmentPaths.Add(part2Burned);
 
                 task.Progress = 65;
                 task.UpdatedTime = DateTime.Now;
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 5. 读取完整字幕（英文 & 中英）
-                var allEnglishSubs = await SrtHelper.ReadAsync(englishSrtPath).ConfigureAwait(false);
-                var allBilingualSubs = await SrtHelper.ReadAsync(bilingualSrtPath).ConfigureAwait(false);
+                // 第三段：中英字幕
+                string part3Srt = bilingualSrtPath; // 全 60 秒中英字幕
+                string part3Path = Path.Combine(
+                    outputDirectory,
+                    $"{task.Name}_Part3_en-zh.mp4");
 
-                task.Progress = 75;
+                string part3Burned = await _videoProcessingService
+                    .BurnSubtitleAsync(baseClipPath, part3Srt, part3Path)
+                    .ConfigureAwait(false);
+
+                tempFiles.Add(part3Burned);
+                finalSegmentPaths.Add(part3Burned);
+
+                task.Progress = 80;
                 task.UpdatedTime = DateTime.Now;
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 6. 为第二 / 三段生成对应的分段字幕并烧入
-                var finalSegmentPaths = new List<string>();
+                // 第四段：无字幕，再拷贝一份基础片段
+                string part4Path = Path.Combine(
+                    outputDirectory,
+                    $"{task.Name}_Part4_raw.mp4");
 
-                for (int i = 0; i < segments.Count; i++)
-                {
-                    var seg = segments[i];
-                    string originalSegPath = segmentPaths[i];
-
-                    // 第一段：无字幕
-                    if (seg.Index == 1)
-                    {
-                        finalSegmentPaths.Add(originalSegPath);
-                        continue;
-                    }
-
-                    // 第四段：无字幕
-                    if (seg.Index == 4)
-                    {
-                        finalSegmentPaths.Add(originalSegPath);
-                        continue;
-                    }
-
-                    // 计算当前段的字幕时间范围
-                    double segStart = seg.StartSeconds;
-                    double segEnd = seg.EndSeconds;
-
-                    if (seg.Index == 2)
-                    {
-                        // 第二段：英文字幕
-                        var segEntries = SliceAndShift(allEnglishSubs, segStart, segEnd);
-                        string segSrtPath = Path.Combine(
-                            outputDirectory,
-                            $"{task.Name}_Part{seg.Index}.en.srt");
-
-                        await SrtHelper.WriteAsync(segSrtPath, segEntries).ConfigureAwait(false);
-
-                        string segOutPath = Path.Combine(
-                            outputDirectory,
-                            $"{task.Name}_Part{seg.Index}_en.mp4");
-
-                        string burnedPath = await _videoProcessingService
-                            .BurnSubtitleAsync(originalSegPath, segSrtPath, segOutPath)
-                            .ConfigureAwait(false);
-
-                        finalSegmentPaths.Add(burnedPath);
-                        continue;
-                    }
-
-                    if (seg.Index == 3)
-                    {
-                        // 第三段：中英字幕
-                        var segEntries = SliceAndShift(allBilingualSubs, segStart, segEnd);
-                        string segSrtPath = Path.Combine(
-                            outputDirectory,
-                            $"{task.Name}_Part{seg.Index}.en-zh.srt");
-
-                        await SrtHelper.WriteAsync(segSrtPath, segEntries).ConfigureAwait(false);
-
-                        string segOutPath = Path.Combine(
-                            outputDirectory,
-                            $"{task.Name}_Part{seg.Index}_en-zh.mp4");
-
-                        string burnedPath = await _videoProcessingService
-                            .BurnSubtitleAsync(originalSegPath, segSrtPath, segOutPath)
-                            .ConfigureAwait(false);
-
-                        finalSegmentPaths.Add(burnedPath);
-                        continue;
-                    }
-                }
+                File.Copy(baseClipPath, part4Path, overwrite: true);
+                tempFiles.Add(part4Path);
+                finalSegmentPaths.Add(part4Path);
 
                 task.Progress = 90;
                 task.UpdatedTime = DateTime.Now;
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 7. 合并四段视频为最终成品
+                // 5. 合并四段 → 输出 4 分钟成品视频
                 string outputFileName = $"{task.Name}_EasyCut.mp4";
                 string mergedPath = await _videoProcessingService
                     .MergeSegmentsAsync(finalSegmentPaths, outputDirectory, outputFileName)
@@ -212,12 +228,28 @@ namespace EasyCut.Services
 
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
+                // 6. 成功后删除所有中间文件，只保留最终成品
+                foreach (var file in tempFiles)
+                {
+                    try
+                    {
+                        if (!string.IsNullOrWhiteSpace(file) && File.Exists(file))
+                        {
+                            File.Delete(file);
+                        }
+                    }
+                    catch
+                    {
+                        // 删除失败忽略
+                    }
+                }
+
                 return task;
             }
             catch (Exception ex)
             {
                 task.Status = VideoTaskStatus.Failed;
-                task.ErrorMessage = ex.ToString(); // 保存完整异常信息便于排查
+                task.ErrorMessage = ex.ToString();
                 task.UpdatedTime = DateTime.Now;
 
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
@@ -229,91 +261,6 @@ namespace EasyCut.Services
         public Task<VideoTask?> GetTaskAsync(Guid id)
         {
             return _repository.GetByIdAsync(id);
-        }
-
-        /// <summary>
-        /// 将视频时长平均分成四段。
-        /// </summary>
-        private static List<SegmentConfig> BuildFourSegments(double durationSeconds)
-        {
-            if (durationSeconds <= 0)
-            {
-                throw new ArgumentException("视频时长无效。", nameof(durationSeconds));
-            }
-
-            double quarter = durationSeconds / 4.0;
-
-            double s1 = 0;
-            double e1 = quarter;
-
-            double s2 = e1;
-            double e2 = quarter * 2;
-
-            double s3 = e2;
-            double e3 = quarter * 3;
-
-            double s4 = e3;
-            double e4 = durationSeconds;
-
-            return new List<SegmentConfig>
-            {
-                new SegmentConfig { Index = 1, StartSeconds = s1, EndSeconds = e1 },
-                new SegmentConfig { Index = 2, StartSeconds = s2, EndSeconds = e2 },
-                new SegmentConfig { Index = 3, StartSeconds = s3, EndSeconds = e3 },
-                new SegmentConfig { Index = 4, StartSeconds = s4, EndSeconds = e4 }
-            };
-        }
-
-        /// <summary>
-        /// 截取指定时间段内的字幕，并将时间轴重置为从 0 开始（匹配切分后片段）。
-        /// </summary>
-        private static IReadOnlyList<SrtEntry> SliceAndShift(
-            IReadOnlyList<SrtEntry> allEntries,
-            double segmentStartSeconds,
-            double segmentEndSeconds)
-        {
-            var result = new List<SrtEntry>();
-
-            if (allEntries.Count == 0 || segmentEndSeconds <= segmentStartSeconds)
-            {
-                return result;
-            }
-
-            var segStart = TimeSpan.FromSeconds(segmentStartSeconds);
-            var segEnd = TimeSpan.FromSeconds(segmentEndSeconds);
-
-            foreach (var e in allEntries)
-            {
-                if (e.End <= segStart || e.Start >= segEnd)
-                {
-                    continue;
-                }
-
-                var newStart = e.Start - segStart;
-                var newEnd = e.End - segStart;
-
-                if (newStart < TimeSpan.Zero)
-                {
-                    newStart = TimeSpan.Zero;
-                }
-
-                if (newEnd <= newStart)
-                {
-                    newEnd = newStart + TimeSpan.FromMilliseconds(500);
-                }
-
-                var clone = new SrtEntry
-                {
-                    Index = result.Count + 1,
-                    Start = newStart,
-                    End = newEnd
-                };
-                clone.Lines.AddRange(e.Lines);
-
-                result.Add(clone);
-            }
-
-            return result;
         }
     }
 }

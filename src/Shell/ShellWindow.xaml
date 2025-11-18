@@ -39,9 +39,12 @@
                 <DataGridTextColumn Header="错误信息"
                             Binding="{Binding ErrorMessage}"
                             Width="3*" />
-
+                <!-- 当前阶段 -->
+                <DataGridTextColumn Header="当前阶段"
+                            Binding="{Binding PhaseDisplay}"
+                            Width="2*" />
                 <!-- 进度条列 -->
-                <DataGridTemplateColumn Header="进度" Width="1.5*">
+                <DataGridTemplateColumn Header="进度" Width="2*">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
                             <ProgressBar Minimum="0"
