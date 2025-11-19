@@ -13,11 +13,11 @@ namespace EasyCut.Services
 {
     /// <summary>
     /// 视频任务协调服务：
-    /// - 截取原视频前 60 秒作为基础片段；
-    /// - 抽取这 60 秒音频并用 Whisper 生成英文 / 中英字幕；
-    /// - 生成四个中文片头（黑底白字）；
-    /// - 顺序拼接生成学习版视频；
-    /// - 只保留最终合并视频，其余中间文件自动清理。
+    /// - 使用 Whisper 对整段视频生成字幕；
+    /// - 根据字幕内容自动选取一段适合学习的片段；
+    /// - 对该片段制作 4 遍学习视频（无字幕 / 英文 / 中英 / 无字幕）；
+    /// - 自动生成片头并拼接完整学习版视频；
+    /// - 清理中间文件，仅保留最终输出。
     /// </summary>
     public sealed class VideoTaskCoordinator : IVideoTaskCoordinator
     {
@@ -57,9 +57,6 @@ namespace EasyCut.Services
         /// <summary>
         /// 创建任务（只建任务，不执行）。
         /// </summary>
-        /// <param name="inputVideoPath">输入视频路径。</param>
-        /// <param name="outputDirectory">输出目录。</param>
-        /// <returns>新创建的任务。</returns>
         public async Task<VideoTask> CreateTaskAsync(string inputVideoPath, string outputDirectory)
         {
             if (string.IsNullOrWhiteSpace(inputVideoPath))
@@ -80,7 +77,6 @@ namespace EasyCut.Services
                 Id = Guid.NewGuid(),
                 InputVideoPath = inputVideoPath,
                 OutputDirectory = outputDirectory,
-                // 和你的原实现保持一致：用不带扩展名的文件名。
                 Name = Path.GetFileNameWithoutExtension(inputVideoPath),
                 Status = VideoTaskStatus.Pending,
                 Phase = VideoTaskPhase.Pending,
@@ -89,10 +85,7 @@ namespace EasyCut.Services
                 UpdatedTime = now
             };
 
-            // 持久化一份
             await _repository.InsertAsync(task).ConfigureAwait(false);
-
-            // 缓存在内存中，用于 UI 绑定实时更新
             _taskCache[task.Id] = task;
 
             return task;
@@ -101,13 +94,10 @@ namespace EasyCut.Services
         /// <summary>
         /// 执行指定任务 Id 对应的完整视频处理流程。
         /// </summary>
-        /// <param name="taskId">任务 Id。</param>
-        /// <param name="cancellationToken">取消标记。</param>
         public async Task RunTaskAsync(Guid taskId, CancellationToken cancellationToken = default)
         {
             if (!_taskCache.TryGetValue(taskId, out var task))
             {
-                // 如果缓存中没有，尝试从仓储加载
                 var fromDb = await _repository.GetByIdAsync(taskId).ConfigureAwait(false);
                 if (fromDb is null)
                 {
@@ -118,7 +108,6 @@ namespace EasyCut.Services
                 _taskCache[taskId] = task;
             }
 
-            // 所有中间文件路径，成功后统一删除
             var tempFiles = new List<string>();
 
             try
@@ -127,7 +116,7 @@ namespace EasyCut.Services
                 UpdateOnUiThread(task, t =>
                 {
                     t.Status = VideoTaskStatus.Processing;
-                    t.Phase = VideoTaskPhase.Pending;
+                    t.Phase = VideoTaskPhase.ExtractingAudio;
                     t.Progress = 5;
                     t.UpdatedTime = DateTime.Now;
                 });
@@ -135,48 +124,17 @@ namespace EasyCut.Services
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 1. 获取总时长，至少要有 60 秒
-                double totalDuration = await _videoProcessingService
+                // 0. 获取视频总时长（用于自动选片段的兜底）
+                var totalDuration = await _videoProcessingService
                     .GetVideoDurationAsync(task.InputVideoPath)
                     .ConfigureAwait(false);
 
-                if (totalDuration < 60.0)
-                {
-                    throw new InvalidOperationException("视频总时长不足 60 秒，无法生成 4 遍学习视频。");
-                }
-
-                // 2. 截取前 60 秒作为基础片段
-                UpdateOnUiThread(task, t =>
-                {
-                    t.Phase = VideoTaskPhase.SplittingVideo;
-                    t.Progress = 10;
-                    t.UpdatedTime = DateTime.Now;
-                });
-                await _repository.UpdateAsync(task).ConfigureAwait(false);
-
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var baseSegments = new List<SegmentConfig>
-                {
-                    new SegmentConfig
-                    {
-                        Index = 1,
-                        StartSeconds = 0,
-                        EndSeconds = 60
-                    }
-                };
-
-                var baseSegmentPaths = await _videoProcessingService
-                    .SplitVideoAsync(task.InputVideoPath, baseSegments, task.OutputDirectory)
+                // 1. 抽取整段音频，供 Whisper 生成字幕
+                var fullAudioPath = await _videoProcessingService
+                    .ExtractAudioAsync(task.InputVideoPath, task.OutputDirectory, task.Name + "_full")
                     .ConfigureAwait(false);
 
-                if (baseSegmentPaths.Count == 0)
-                {
-                    throw new InvalidOperationException("截取前 60 秒片段失败。");
-                }
-
-                string baseClipPath = baseSegmentPaths[0];
-                tempFiles.Add(baseClipPath);
+                tempFiles.Add(fullAudioPath);
 
                 UpdateOnUiThread(task, t =>
                 {
@@ -187,81 +145,136 @@ namespace EasyCut.Services
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 3. 抽取基础片段音频
+                // 2. Whisper 生成整段英文 / 中英字幕
                 UpdateOnUiThread(task, t =>
                 {
-                    t.Phase = VideoTaskPhase.ExtractingAudio;
-                    t.Progress = 20;
-                    t.UpdatedTime = DateTime.Now;
-                });
-                await _repository.UpdateAsync(task).ConfigureAwait(false);
-
-                string audioPath = await _videoProcessingService
-                    .ExtractAudioAsync(baseClipPath, task.OutputDirectory, task.Name)
-                    .ConfigureAwait(false);
-
-                tempFiles.Add(audioPath);
-
-                UpdateOnUiThread(task, t =>
-                {
+                    t.Phase = VideoTaskPhase.GeneratingSubtitles;
                     t.Progress = 25;
                     t.UpdatedTime = DateTime.Now;
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // 4. Whisper 生成英文 / 中英字幕
-                UpdateOnUiThread(task, t =>
-                {
-                    t.Phase = VideoTaskPhase.GeneratingSubtitles;
-                    t.Progress = 30;
-                    t.UpdatedTime = DateTime.Now;
-                });
-                await _repository.UpdateAsync(task).ConfigureAwait(false);
-
-                var (englishSrtPath, bilingualSrtPath) =
+                var (englishFullSrtPath, bilingualFullSrtPath) =
                     await _subtitleGenerator.GenerateEnglishAndBilingualSrtAsync(
-                            audioPath,
+                            fullAudioPath,
                             task.OutputDirectory,
-                            baseFileName: task.Name,
-                            translateAsync: null)  // 先不翻译，中英字幕后续再接 AI
+                            baseFileName: task.Name + "_full",
+                            translateAsync: null)
                         .ConfigureAwait(false);
 
-                tempFiles.Add(englishSrtPath);
-                tempFiles.Add(bilingualSrtPath);
+                tempFiles.Add(englishFullSrtPath);
+                tempFiles.Add(bilingualFullSrtPath);
 
                 UpdateOnUiThread(task, t =>
                 {
-                    t.Progress = 40;
+                    t.Progress = 35;
                     t.UpdatedTime = DateTime.Now;
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 5. 构造四个片头卡片（黑底白字）
-                const double titleDuration = 2.0; // 每个片头 2 秒，可按需调整
+                // 3. 解析字幕并自动选取一段适合学习的片段
+                var subtitles = SrtHelper.Parse(englishFullSrtPath);
 
-                string intro1Path = await _videoProcessingService.CreateTitleCardAsync(
+                var (clipStartSec, clipEndSec) = SrtHelper.PickBestSegment(
+        subtitles,
+        totalDurationSeconds: totalDuration,
+        minDuration: 4.0,
+        maxDuration: totalDuration, // 几乎不限制
+        targetDuration: totalDuration / 10.0); // 比如“整段的 1/10”当作理想长度
+
+                UpdateOnUiThread(task, t =>
+                {
+                    t.Phase = VideoTaskPhase.SplittingVideo;
+                    t.Progress = 45;
+                    t.UpdatedTime = DateTime.Now;
+                });
+                await _repository.UpdateAsync(task).ConfigureAwait(false);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // 4. 按选取的时间范围从原视频截取基础片段
+                var baseSegments = new List<SegmentConfig>
+                {
+                    new SegmentConfig
+                    {
+                        Index = 1,
+                        StartSeconds = clipStartSec,
+                        EndSeconds = clipEndSec
+                    }
+                };
+
+                var baseSegmentPaths = await _videoProcessingService
+                    .SplitVideoAsync(task.InputVideoPath, baseSegments, task.OutputDirectory)
+                    .ConfigureAwait(false);
+
+                if (baseSegmentPaths.Count == 0)
+                {
+                    throw new InvalidOperationException("截取学习片段失败。");
+                }
+
+                var baseClipPath = baseSegmentPaths[0];
+                tempFiles.Add(baseClipPath);
+
+                UpdateOnUiThread(task, t =>
+                {
+                    t.Progress = 55;
+                    t.UpdatedTime = DateTime.Now;
+                });
+                await _repository.UpdateAsync(task).ConfigureAwait(false);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // 5. 从整段字幕中裁剪出该片段对应的字幕（并将时间平移到 0）
+                var englishClipSrtPath = SrtHelper.CropAndShift(
+                    englishFullSrtPath,
+                    clipStartSec,
+                    clipEndSec,
+                    task.OutputDirectory,
+                    $"{task.Name}_Clip_en.srt");
+
+                var bilingualClipSrtPath = SrtHelper.CropAndShift(
+                    bilingualFullSrtPath,
+                    clipStartSec,
+                    clipEndSec,
+                    task.OutputDirectory,
+                    $"{task.Name}_Clip_bi.srt");
+
+                tempFiles.Add(englishClipSrtPath);
+                tempFiles.Add(bilingualClipSrtPath);
+
+                UpdateOnUiThread(task, t =>
+                {
+                    t.Progress = 60;
+                    t.UpdatedTime = DateTime.Now;
+                });
+                await _repository.UpdateAsync(task).ConfigureAwait(false);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // 6. 构造四个片头卡片（黑底白字）
+                const double titleDuration = 2.0;
+
+                var intro1Path = await _videoProcessingService.CreateTitleCardAsync(
                     "第一遍 无字幕",
                     task.OutputDirectory,
                     $"{task.Name}_Intro1.mp4",
                     titleDuration).ConfigureAwait(false);
 
-                string intro2Path = await _videoProcessingService.CreateTitleCardAsync(
+                var intro2Path = await _videoProcessingService.CreateTitleCardAsync(
                     "第二遍 英文字幕",
                     task.OutputDirectory,
                     $"{task.Name}_Intro2.mp4",
                     titleDuration).ConfigureAwait(false);
 
-                string intro3Path = await _videoProcessingService.CreateTitleCardAsync(
+                var intro3Path = await _videoProcessingService.CreateTitleCardAsync(
                     "第三遍 中英文字幕",
                     task.OutputDirectory,
                     $"{task.Name}_Intro3.mp4",
                     titleDuration).ConfigureAwait(false);
 
-                string intro4Path = await _videoProcessingService.CreateTitleCardAsync(
+                var intro4Path = await _videoProcessingService.CreateTitleCardAsync(
                     "最后一遍 无字幕",
                     task.OutputDirectory,
                     $"{task.Name}_Intro4.mp4",
@@ -274,18 +287,18 @@ namespace EasyCut.Services
 
                 UpdateOnUiThread(task, t =>
                 {
-                    t.Progress = 50;
+                    t.Progress = 70;
                     t.UpdatedTime = DateTime.Now;
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 6. 生成四遍视频片段
+                // 7. 生成四遍视频片段：P1 无字幕、P2 英文字幕、P3 中英字幕、P4 无字幕
                 var finalSegmentPaths = new List<string>();
 
-                // Part1：无字幕（拷贝一份基础片段）
-                string part1Path = Path.Combine(task.OutputDirectory, $"{task.Name}_Part1_raw.mp4");
+                // Part1：无字幕（拷贝基础片段）
+                var part1Path = Path.Combine(task.OutputDirectory, $"{task.Name}_Part1_raw.mp4");
                 File.Copy(baseClipPath, part1Path, overwrite: true);
                 tempFiles.Add(part1Path);
 
@@ -293,47 +306,47 @@ namespace EasyCut.Services
                 UpdateOnUiThread(task, t =>
                 {
                     t.Phase = VideoTaskPhase.BurningSubtitlePart2;
-                    t.Progress = 60;
+                    t.Progress = 75;
                     t.UpdatedTime = DateTime.Now;
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                string part2Out = Path.Combine(task.OutputDirectory, $"{task.Name}_Part2_en.mp4");
-                string part2Burned = await _videoProcessingService
-                    .BurnSubtitleAsync(baseClipPath, englishSrtPath, part2Out)
+                var part2Out = Path.Combine(task.OutputDirectory, $"{task.Name}_Part2_en.mp4");
+                var part2Burned = await _videoProcessingService
+                    .BurnSubtitleAsync(baseClipPath, englishClipSrtPath, part2Out)
                     .ConfigureAwait(false);
                 tempFiles.Add(part2Burned);
 
-                // Part3：中英文字幕（目前“中英”实际上还是英文两遍占位，后续接翻译）
+                // Part3：中英字幕
                 UpdateOnUiThread(task, t =>
                 {
                     t.Phase = VideoTaskPhase.BurningSubtitlePart3;
-                    t.Progress = 70;
+                    t.Progress = 80;
                     t.UpdatedTime = DateTime.Now;
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                string part3Out = Path.Combine(task.OutputDirectory, $"{task.Name}_Part3_en-zh.mp4");
-                string part3Burned = await _videoProcessingService
-                    .BurnSubtitleAsync(baseClipPath, bilingualSrtPath, part3Out)
+                var part3Out = Path.Combine(task.OutputDirectory, $"{task.Name}_Part3_en-zh.mp4");
+                var part3Burned = await _videoProcessingService
+                    .BurnSubtitleAsync(baseClipPath, bilingualClipSrtPath, part3Out)
                     .ConfigureAwait(false);
                 tempFiles.Add(part3Burned);
 
                 // Part4：无字幕（再拷贝一份基础片段）
-                string part4Path = Path.Combine(task.OutputDirectory, $"{task.Name}_Part4_raw.mp4");
+                var part4Path = Path.Combine(task.OutputDirectory, $"{task.Name}_Part4_raw.mp4");
                 File.Copy(baseClipPath, part4Path, overwrite: true);
                 tempFiles.Add(part4Path);
 
                 UpdateOnUiThread(task, t =>
                 {
-                    t.Progress = 75;
+                    t.Progress = 85;
                     t.UpdatedTime = DateTime.Now;
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 7. 最终拼接顺序（学习版）：
+                // 8. 最终拼接顺序：
                 // Intro1 -> Part1 -> Intro2 -> Part2 -> Intro3 -> Part3 -> Intro4 -> Part4
                 finalSegmentPaths.Add(intro1Path);
                 finalSegmentPaths.Add(part1Path);
@@ -344,7 +357,6 @@ namespace EasyCut.Services
                 finalSegmentPaths.Add(intro4Path);
                 finalSegmentPaths.Add(part4Path);
 
-                // 8. 合并为最终成品视频
                 UpdateOnUiThread(task, t =>
                 {
                     t.Phase = VideoTaskPhase.MergingSegments;
@@ -353,8 +365,9 @@ namespace EasyCut.Services
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                string outputFileName = $"{task.Name}_EasyCut_Learning.mp4";
-                string mergedPath = await _videoProcessingService
+                // 9. 合并为最终成品视频
+                var outputFileName = $"{task.Name}_EasyCut_Learning.mp4";
+                var mergedPath = await _videoProcessingService
                     .MergeSegmentsAsync(finalSegmentPaths, task.OutputDirectory, outputFileName)
                     .ConfigureAwait(false);
 
@@ -369,7 +382,7 @@ namespace EasyCut.Services
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
 
-                // 9. 清理中间文件，只保留成品
+                // 10. 清理中间文件
                 foreach (var file in tempFiles)
                 {
                     try
@@ -410,7 +423,7 @@ namespace EasyCut.Services
         }
 
         /// <summary>
-        /// 兼容旧用法：创建并执行任务（用于非 UI 场景）。
+        /// 兼容用法：创建并执行任务（非 UI 场景可直接调用）。
         /// </summary>
         public async Task<VideoTask> CreateAndRunTaskAsync(string inputVideoPath, string outputDirectory)
         {
@@ -424,7 +437,6 @@ namespace EasyCut.Services
         /// </summary>
         public async Task<VideoTask?> GetTaskAsync(Guid id)
         {
-            // 优先返回内存中的（UI 正在绑定的那份）
             if (_taskCache.TryGetValue(id, out var cached))
             {
                 return cached;
@@ -442,8 +454,6 @@ namespace EasyCut.Services
         /// <summary>
         /// 在 UI 线程上更新任务对象，确保线程安全。
         /// </summary>
-        /// <param name="task">任务对象。</param>
-        /// <param name="updateAction">更新逻辑。</param>
         private static void UpdateOnUiThread(VideoTask task, Action<VideoTask> updateAction)
         {
             var app = Application.Current;
