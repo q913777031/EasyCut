@@ -27,6 +27,11 @@ namespace EasyCut.Services
         /// </summary>
         private const string FfprobeExe = "ffprobe";
 
+        /// <summary>
+        /// Windows 下常见的中文字体文件（可按需要修改）。
+        /// </summary>
+        private const string DefaultFontFile = @"C:\Windows\Fonts\msyh.ttc";
+
         /// <inheritdoc />
         public async Task<double> GetVideoDurationAsync(string videoPath)
         {
@@ -109,9 +114,9 @@ namespace EasyCut.Services
                 string args =
                     $"-y -ss {start} -i \"{videoPath}\" " +
                     $"-t {duration} " +
-                    "-c:v libx264 -preset veryfast -crf 20 " +
-                    "-c:a aac -ac 2 -b:a 192k " +
-                    "-reset_timestamps 1 " +
+             "-c:v libx264 -preset veryfast -crf 20 " +
+             "-c:a aac -ac 2 -ar 48000 -b:a 192k " +
+             "-reset_timestamps 1 " +
                     $"\"{segmentPath}\"";
 
                 await RunFfmpegAsync(args, outputDirectory).ConfigureAwait(false);
@@ -122,6 +127,7 @@ namespace EasyCut.Services
             return result;
         }
 
+        /// <inheritdoc />
         /// <inheritdoc />
         /// <inheritdoc />
         public async Task<string> MergeSegmentsAsync(
@@ -136,45 +142,52 @@ namespace EasyCut.Services
 
             Directory.CreateDirectory(outputDirectory);
 
-            string listFilePath = Path.Combine(outputDirectory, "concat_list.txt");
-            var sb = new StringBuilder();
-
-            foreach (var path in segmentVideoPaths)
-            {
-                if (string.IsNullOrWhiteSpace(path))
-                    continue;
-
-                string fullPath = Path.GetFullPath(path);
-                string normalizedPath = fullPath.Replace("\\", "/").Replace("'", "''");
-                sb.AppendLine($"file '{normalizedPath}'");
-            }
-
-            var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-            await File.WriteAllTextAsync(listFilePath, sb.ToString(), utf8NoBom).ConfigureAwait(false);
-
             string outputPath = Path.Combine(outputDirectory, outputFileName);
 
-            // 关键：统一重编码，避免后面片段音画不同步
-            string args =
-        $"-y -f concat -safe 0 -i \"{listFilePath}\" " +
-        "-c:v libx264 -preset veryfast -crf 20 " +
-        "-c:a aac -ac 2 -b:a 192k " +   // 关键：强制转为 2 声道
-        $"\"{outputPath}\"";
+            // 1. 构造输入参数：-i "seg0" -i "seg1" ...
+            var argsBuilder = new StringBuilder("-y ");
+
+            for (int i = 0; i < segmentVideoPaths.Count; i++)
+            {
+                string path = segmentVideoPaths[i];
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    continue;
+                }
+
+                string fullPath = Path.GetFullPath(path);
+                argsBuilder.Append("-i \"").Append(fullPath).Append("\" ");
+            }
+
+            // 2. 构造 filter_complex：
+            //    [0:v][0:a][1:v][1:a]...[N-1:v][N-1:a]concat=n=N:v=1:a=1[v][a]
+            var filterBuilder = new StringBuilder();
+
+            int inputCount = segmentVideoPaths.Count;
+
+            for (int i = 0; i < inputCount; i++)
+            {
+                filterBuilder.Append('[').Append(i).Append(":v]");
+                filterBuilder.Append('[').Append(i).Append(":a]");
+            }
+
+            filterBuilder.Append("concat=n=")
+                         .Append(inputCount)
+                         .Append(":v=1:a=1[v][a]");
+
+            argsBuilder.Append("-filter_complex \"")
+                       .Append(filterBuilder)
+                       .Append("\" ");
+
+            // 3. 映射过滤后的视频 / 音频，并统一编码参数
+            argsBuilder.Append("-map \"[v]\" -map \"[a]\" ")
+                       .Append("-c:v libx264 -preset veryfast -crf 20 ")
+                       .Append("-c:a aac -ac 2 -ar 48000 -b:a 192k ")
+                       .Append("\"").Append(outputPath).Append('"');
+
+            string args = argsBuilder.ToString();
 
             await RunFfmpegAsync(args, outputDirectory).ConfigureAwait(false);
-
-            // concat_list 只是临时文件，合并完成就删
-            try
-            {
-                if (File.Exists(listFilePath))
-                {
-                    File.Delete(listFilePath);
-                }
-            }
-            catch
-            {
-                // 删除失败可以忽略
-            }
 
             return outputPath;
         }
@@ -259,7 +272,66 @@ namespace EasyCut.Services
         }
 
         /// <summary>
-        /// 内部封装 ffmpeg 调用，只重定向错误输出。
+        /// 生成黑底白字中文提示片头。
+        /// </summary>
+        /// <summary>
+        /// 生成黑底白字中文提示片头（带静音音轨，便于 concat）。
+        /// </summary>
+        public async Task<string> CreateTitleCardAsync(
+            string text,
+            string outputDirectory,
+            string fileName,
+            double durationSeconds = 2.0)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                throw new ArgumentException("片头文字不能为空。", nameof(text));
+
+            if (string.IsNullOrWhiteSpace(outputDirectory))
+                throw new ArgumentException("输出目录不能为空。", nameof(outputDirectory));
+
+            if (string.IsNullOrWhiteSpace(fileName))
+                throw new ArgumentException("输出文件名不能为空。", nameof(fileName));
+
+            Directory.CreateDirectory(outputDirectory);
+
+            string outputPath = Path.Combine(outputDirectory, fileName);
+
+            // 处理单引号，避免 drawtext 解析错误
+            string safeText = text.Replace("'", "''");
+
+            const int width = 1280;
+            const int height = 720;
+
+            string durationStr = durationSeconds.ToString(CultureInfo.InvariantCulture);
+
+            // 这里生成：
+            //  - 输入 0：黑色画面 color（带长度 d）
+            //  - 输入 1：静音音频 anullsrc（立体声 + 48k）
+            //  - drawtext 叠字到视频上
+            //  - 最终编码为 H.264 + AAC 立体声 48k
+            // 这样就和 SplitVideoAsync 生成的片段参数一致了
+            string args =
+                $"-y " +
+                $"-f lavfi -i color=c=black:s={width}x{height}:d={durationStr} " + // 视频
+                "-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 " +  // 静音音频
+                "-shortest " +                                                    // 以较短流为准
+                "-vf \"drawtext=font='Microsoft YaHei':" +
+                $"text='{safeText}':" +
+                "fontcolor=white:fontsize=48:" +
+                "x=(w-text_w)/2:y=(h-text_h)/2\" " +
+                "-c:v libx264 -preset veryfast -crf 20 " +
+                "-c:a aac -ac 2 -ar 48000 -b:a 192k " +
+                "-pix_fmt yuv420p " +
+                $"-t {durationStr} " + // 再次限定时长（双保险）
+                $"\"{outputPath}\"";
+
+            await RunFfmpegAsync(args, outputDirectory).ConfigureAwait(false);
+
+            return outputPath;
+        }
+
+        /// <summary>
+        /// 运行 FFmpeg 并处理错误（你之前已经有类似实现，可重用）。
         /// </summary>
         private static async Task RunFfmpegAsync(string arguments, string? workingDirectory = null)
         {

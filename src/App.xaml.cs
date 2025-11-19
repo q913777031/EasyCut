@@ -1,5 +1,6 @@
 ﻿#nullable enable
 
+using System.Net.Http;
 using System.Windows;
 using EasyCut.Services;
 using EasyCut.ViewModels;
@@ -16,6 +17,12 @@ namespace EasyCut
         /// <inheritdoc />
         protected override void RegisterTypes(IContainerRegistry containerRegistry)
         {
+            // HttpClient 建议单例
+            containerRegistry.RegisterSingleton<HttpClient>();
+
+            // 字幕翻译服务（Azure 实现）
+            containerRegistry.RegisterSingleton<ISubtitleTranslator, AzureSubtitleTranslator>();
+
             // 仓储
             containerRegistry.RegisterSingleton<IVideoTaskRepository, InMemoryVideoTaskRepository>();
 

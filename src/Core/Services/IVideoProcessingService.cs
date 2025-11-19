@@ -47,5 +47,18 @@ namespace EasyCut.Services
             string inputVideoPath,
             string subtitlePath,
             string outputVideoPath);
+
+        /// <summary>
+        /// 生成黑色背景、白色中文文案的短片头视频。
+        /// </summary>
+        /// <param name="text">要显示的中文内容（例如“第一遍 无字幕”）。</param>
+        /// <param name="outputDirectory">输出目录。</param>
+        /// <param name="fileName">输出文件名（如 xxx_Intro1.mp4）。</param>
+        /// <param name="durationSeconds">片头时长（秒）。</param>
+        Task<string> CreateTitleCardAsync(
+            string text,
+            string outputDirectory,
+            string fileName,
+            double durationSeconds = 2.0);
     }
 }
