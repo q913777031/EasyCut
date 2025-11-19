@@ -3,6 +3,7 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Threading.Tasks;
 using System.Windows;
 using EasyCut.Models;
 using EasyCut.Services;
@@ -12,21 +13,21 @@ using Prism.Mvvm;
 namespace EasyCut.ViewModels
 {
     /// <summary>
-    /// 视频任务列表视图模型
+    /// 视频任务列表视图模型。
     /// </summary>
-    public class VideoTaskListViewModel : BindableBase
+    public sealed class VideoTaskListViewModel : BindableBase
     {
         private readonly IVideoTaskCoordinator _coordinator;
 
         /// <summary>
-        /// 任务集合
+        /// 任务集合。
         /// </summary>
         public ObservableCollection<VideoTask> Tasks { get; } = new();
 
         private VideoTask? _selectedTask;
 
         /// <summary>
-        /// 当前选中的任务
+        /// 当前选中的任务。
         /// </summary>
         public VideoTask? SelectedTask
         {
@@ -35,27 +36,37 @@ namespace EasyCut.ViewModels
         }
 
         /// <summary>
-        /// 新建任务命令
+        /// 新建任务命令。
         /// </summary>
         public DelegateCommand NewTaskCommand { get; }
 
         /// <summary>
-        /// 刷新命令
+        /// 刷新命令。
         /// </summary>
         public DelegateCommand RefreshCommand { get; }
 
         /// <summary>
-        /// 构造函数
+        /// 打开输出目录命令。
+        /// </summary>
+        public DelegateCommand OpenOutputFolderCommand { get; }
+
+        /// <summary>
+        /// 构造函数。
         /// </summary>
         public VideoTaskListViewModel(IVideoTaskCoordinator coordinator)
         {
             _coordinator = coordinator;
+
             NewTaskCommand = new DelegateCommand(OnNewTask);
             RefreshCommand = new DelegateCommand(OnRefresh);
+
             OpenOutputFolderCommand = new DelegateCommand(OnOpenOutputFolder, CanOpenOutputFolder)
-    .ObservesProperty(() => SelectedTask);
+                .ObservesProperty(() => SelectedTask);
         }
 
+        /// <summary>
+        /// 新建任务：选择文件 → 创建任务 → 加入列表 → 后台执行。
+        /// </summary>
         private async void OnNewTask()
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
@@ -63,31 +74,48 @@ namespace EasyCut.ViewModels
                 Filter = "视频文件|*.mp4;*.mkv;*.mov;*.avi|所有文件|*.*"
             };
             if (dlg.ShowDialog() != true)
+            {
                 return;
+            }
 
-            string videoPath = dlg.FileName;
-            string outputDir = System.IO.Path.Combine(
+            var videoPath = dlg.FileName;
+            var outputDir = System.IO.Path.Combine(
                 System.IO.Path.GetDirectoryName(videoPath)!,
                 "EasyCutOutput");
 
             System.IO.Directory.CreateDirectory(outputDir);
 
-            var task = await _coordinator.CreateAndRunTaskAsync(videoPath, outputDir);
+            // 1. 只创建任务，不执行。
+            var task = await _coordinator.CreateTaskAsync(videoPath, outputDir);
+
+            // 2. 立即加入列表，让 UI 立刻看到一行任务。
             Tasks.Add(task);
             SelectedTask = task;
-            if (task.Status == VideoTaskStatus.Failed)
-            {
-                System.Windows.MessageBox.Show(
-                    task.ErrorMessage ?? "未知错误",
-                    "剪辑失败",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
-            }
+
+            // 3. 后台执行任务，过程中任务对象会不断更新进度和阶段。
+            _ = _coordinator.RunTaskAsync(task.Id)
+                .ContinueWith(t =>
+                {
+                    if (t.IsFaulted || task.Status == VideoTaskStatus.Failed)
+                    {
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            MessageBox.Show(
+                                task.ErrorMessage ?? t.Exception?.GetBaseException().Message ?? "未知错误",
+                                "剪辑失败",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Error);
+                        });
+                    }
+                }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
+        /// <summary>
+        /// 手动刷新任务状态（从协调器重新获取最新信息）。
+        /// </summary>
         private async void OnRefresh()
         {
-            for (int i = 0; i < Tasks.Count; i++)
+            for (var i = 0; i < Tasks.Count; i++)
             {
                 var current = Tasks[i];
                 var latest = await _coordinator.GetTaskAsync(current.Id);
@@ -97,12 +125,15 @@ namespace EasyCut.ViewModels
                     current.Progress = latest.Progress;
                     current.ErrorMessage = latest.ErrorMessage;
                     current.UpdatedTime = latest.UpdatedTime;
+                    current.OutputFilePath = latest.OutputFilePath;
+                    current.Phase = latest.Phase;
                 }
             }
         }
 
-        public DelegateCommand OpenOutputFolderCommand { get; }
-
+        /// <summary>
+        /// 是否可以打开输出目录。
+        /// </summary>
         private bool CanOpenOutputFolder()
         {
             return SelectedTask != null
@@ -110,9 +141,15 @@ namespace EasyCut.ViewModels
                    && System.IO.Directory.Exists(SelectedTask.OutputDirectory);
         }
 
+        /// <summary>
+        /// 打开输出目录。
+        /// </summary>
         private void OnOpenOutputFolder()
         {
-            if (SelectedTask == null) return;
+            if (SelectedTask == null)
+            {
+                return;
+            }
 
             var dir = SelectedTask.OutputDirectory;
             if (System.IO.Directory.Exists(dir))
