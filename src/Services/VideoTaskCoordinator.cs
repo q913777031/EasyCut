@@ -4,23 +4,32 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using EasyCut.Models;
+using EasyCut.Scripting;
+using EasyCut.Services; // 确保命名空间正确
 
 namespace EasyCut.Services
 {
     /// <summary>
     /// 视频任务协调服务：
-    /// - 使用 Whisper 对整段视频生成字幕；
-    /// - 根据字幕内容自动选取一段适合学习的片段；
+    /// - 如有匹配剧本（ScriptsEpisodes 下 pdf -> json）且有片段，则优先按剧本片段剪辑；
+    /// - 否则使用 Whisper 对整段视频生成字幕，并根据字幕内容自动选取一段适合学习的片段；
     /// - 对该片段制作 4 遍学习视频（无字幕 / 英文 / 中英 / 无字幕）；
     /// - 自动生成片头并拼接完整学习版视频；
     /// - 清理中间文件，仅保留最终输出。
     /// </summary>
     public sealed class VideoTaskCoordinator : IVideoTaskCoordinator
     {
+        /// <summary>
+        /// 用于从文件名中提取剧集代码（如 S01E01）。
+        /// </summary>
+        private static readonly Regex EpisodeCodeRegex =
+            new Regex(@"S\d{2}E\d{2}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         /// <summary>
         /// 任务仓储。
         /// </summary>
@@ -32,9 +41,19 @@ namespace EasyCut.Services
         private readonly IVideoProcessingService _videoProcessingService;
 
         /// <summary>
-        /// 字幕生成服务。
+        /// 字幕生成服务（Whisper）。
         /// </summary>
         private readonly ISubtitleGenerator _subtitleGenerator;
+
+        /// <summary>
+        /// 剧本仓储（从 SxxExx.json 读取 ScriptEpisode）。
+        /// </summary>
+        private readonly IScriptEpisodeRepository _scriptEpisodeRepository;
+
+        /// <summary>
+        /// 剧本导入器（扫描 ScriptsEpisodes 下的 pdf，生成 json）。
+        /// </summary>
+        private readonly PdfScriptEpisodeImporter _scriptEpisodeImporter;
 
         /// <summary>
         /// 内存任务缓存（用于 UI 实时进度更新）。
@@ -47,11 +66,15 @@ namespace EasyCut.Services
         public VideoTaskCoordinator(
             IVideoTaskRepository repository,
             IVideoProcessingService videoProcessingService,
-            ISubtitleGenerator subtitleGenerator)
+            ISubtitleGenerator subtitleGenerator,
+            IScriptEpisodeRepository scriptEpisodeRepository,
+            PdfScriptEpisodeImporter scriptEpisodeImporter)
         {
-            _repository = repository;
-            _videoProcessingService = videoProcessingService;
-            _subtitleGenerator = subtitleGenerator;
+            _repository = repository ?? throw new ArgumentNullException(nameof(repository));
+            _videoProcessingService = videoProcessingService ?? throw new ArgumentNullException(nameof(videoProcessingService));
+            _subtitleGenerator = subtitleGenerator ?? throw new ArgumentNullException(nameof(subtitleGenerator));
+            _scriptEpisodeRepository = scriptEpisodeRepository ?? throw new ArgumentNullException(nameof(scriptEpisodeRepository));
+            _scriptEpisodeImporter = scriptEpisodeImporter ?? throw new ArgumentNullException(nameof(scriptEpisodeImporter));
         }
 
         /// <summary>
@@ -124,12 +147,61 @@ namespace EasyCut.Services
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 0. 获取视频总时长（用于自动选片段的兜底）
+                // 0. 获取视频总时长（用于选片段的兜底）
                 var totalDuration = await _videoProcessingService
                     .GetVideoDurationAsync(task.InputVideoPath)
                     .ConfigureAwait(false);
 
-                // 1. 抽取整段音频，供 Whisper 生成字幕
+                if (totalDuration <= 0)
+                {
+                    throw new InvalidOperationException("无法获取视频时长或视频时长为 0。");
+                }
+
+                // 0.1 先尝试从剧本中选片段（不会用到 Whisper）
+                //    如果失败（无剧本/无片段），再走 Whisper + 字幕自动选片段。
+                bool hasScriptSegment = false;
+                double scriptClipStart = 0;
+                double scriptClipEnd = 0;
+
+                try
+                {
+                    // 扫描 ScriptsEpisodes 文件夹，自动为所有 pdf 生成 json（幂等）
+                    await _scriptEpisodeImporter.ImportAllAsync(cancellationToken).ConfigureAwait(false);
+
+                    // 根据视频文件名提取 SxxExx
+                    var videoFileName = Path.GetFileNameWithoutExtension(task.InputVideoPath);
+                    var episodeCode = TryGetEpisodeCodeFromFileName(videoFileName);
+
+                    if (!string.IsNullOrWhiteSpace(episodeCode))
+                    {
+                        var scriptEpisode = await _scriptEpisodeRepository
+                            .TryLoadByEpisodeCodeAsync(episodeCode, cancellationToken)
+                            .ConfigureAwait(false);
+
+                        if (scriptEpisode is not null &&
+                            scriptEpisode.Segments is { Count: > 0 })
+                        {
+                            // 这里先简单取第一条 Segment，
+                            // 后面你可以加 Tag/权重等逻辑来选“学习片段”。
+                            var seg = scriptEpisode.Segments[0];
+
+                            scriptClipStart = Math.Max(0, seg.StartSeconds);
+                            scriptClipEnd = Math.Min(totalDuration, seg.EndSeconds);
+
+                            if (scriptClipEnd > scriptClipStart + 0.1)
+                            {
+                                hasScriptSegment = true;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // 剧本解析出问题，不影响后续 Whisper 流程，直接当做没有剧本。
+                    hasScriptSegment = false;
+                }
+
+                // 1. 抽取整段音频，供 Whisper 生成字幕（不管有无剧本都要生成字幕）
                 var fullAudioPath = await _videoProcessingService
                     .ExtractAudioAsync(task.InputVideoPath, task.OutputDirectory, task.Name + "_full")
                     .ConfigureAwait(false);
@@ -174,15 +246,21 @@ namespace EasyCut.Services
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 3. 解析字幕并选择片段（优先使用手工片段）
+                // 3. 解析字幕并选择片段
                 var subtitles = SrtHelper.Parse(englishFullSrtPath);
 
                 double clipStartSec;
                 double clipEndSec;
 
-                if (task.ClipStartSeconds.HasValue && task.ClipEndSeconds.HasValue)
+                if (hasScriptSegment)
                 {
-                    // 手工选择的片段
+                    // 3.1 优先使用剧本中的片段
+                    clipStartSec = scriptClipStart;
+                    clipEndSec = scriptClipEnd;
+                }
+                else if (task.ClipStartSeconds.HasValue && task.ClipEndSeconds.HasValue)
+                {
+                    // 3.2 用户手工选择的片段
                     clipStartSec = Math.Max(0, task.ClipStartSeconds.Value);
                     clipEndSec = Math.Min(totalDuration, task.ClipEndSeconds.Value);
 
@@ -199,13 +277,29 @@ namespace EasyCut.Services
                 }
                 else
                 {
-                    // 没有手工片段，就用自动规则
+                    // 3.3 没有剧本片段、也没有手工片段，就用自动规则
                     (clipStartSec, clipEndSec) = SrtHelper.PickBestSegment(
                         subtitles,
                         totalDurationSeconds: totalDuration,
                         minDuration: 4.0,
                         maxDuration: Math.Min(totalDuration, 45.0),
                         targetDuration: 18.0);
+                }
+
+                // 再保险一次范围校正
+                if (clipStartSec < 0)
+                {
+                    clipStartSec = 0;
+                }
+
+                if (clipEndSec > totalDuration)
+                {
+                    clipEndSec = totalDuration;
+                }
+
+                if (clipEndSec <= clipStartSec + 0.1)
+                {
+                    throw new InvalidOperationException("选取的学习片段时间范围无效。");
                 }
 
                 UpdateOnUiThread(task, t =>
@@ -471,6 +565,20 @@ namespace EasyCut.Services
             }
 
             return fromDb;
+        }
+
+        /// <summary>
+        /// 从文件名中提取 SxxExx 剧集代码（不区分大小写）。
+        /// </summary>
+        private static string? TryGetEpisodeCodeFromFileName(string fileNameWithoutExtension)
+        {
+            var match = EpisodeCodeRegex.Match(fileNameWithoutExtension);
+            if (!match.Success)
+            {
+                return null;
+            }
+
+            return match.Value.ToUpperInvariant();
         }
 
         /// <summary>

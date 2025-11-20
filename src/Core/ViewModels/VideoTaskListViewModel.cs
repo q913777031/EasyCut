@@ -3,15 +3,14 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
 using EasyCut.Models;
 using EasyCut.Services;
+using Microsoft.Win32;
 using Prism.Commands;
 using Prism.Mvvm;
-using EasyCut.Views;
-using Microsoft.Win32;
-using System.IO;
 
 namespace EasyCut.ViewModels
 {
@@ -68,7 +67,7 @@ namespace EasyCut.ViewModels
         }
 
         /// <summary>
-        /// 新建任务：选择文件 → 创建任务 → 加入列表 → 后台执行。
+        /// 新建任务：选择文件 → 创建任务 → 加入列表 → 后台执行（自动优先，失败再人工）。
         /// </summary>
         private async void OnNewTask()
         {
@@ -86,22 +85,14 @@ namespace EasyCut.ViewModels
 
             Directory.CreateDirectory(outputDir);
 
-            // ① 先让用户可视化选择片段
-            if (!SegmentSelectionDialog.TrySelectSegment(videoPath, out var clipStart, out var clipEnd))
-            {
-                // 用户点击了“取消”
-                return;
-            }
-
-            // ② 创建任务，并把手工片段写到任务里
+            // 直接创建任务，不设置 ClipStart/End：
+            // 后续由 VideoTaskCoordinator 先用 OpenAI 自动选片段，
+            // 自动不行时再弹人工片段选择窗口。
             var task = await _coordinator.CreateTaskAsync(videoPath, outputDir);
-            task.ClipStartSeconds = clipStart;
-            task.ClipEndSeconds = clipEnd;
-
             Tasks.Add(task);
             SelectedTask = task;
 
-            // ③ 后台执行任务（流程里会优先使用 ClipStart/End）
+            // 后台执行任务
             _ = _coordinator.RunTaskAsync(task.Id)
                 .ContinueWith(t =>
                 {
@@ -147,7 +138,7 @@ namespace EasyCut.ViewModels
         {
             return SelectedTask != null
                    && !string.IsNullOrWhiteSpace(SelectedTask.OutputDirectory)
-                   && System.IO.Directory.Exists(SelectedTask.OutputDirectory);
+                   && Directory.Exists(SelectedTask.OutputDirectory);
         }
 
         /// <summary>
@@ -161,7 +152,7 @@ namespace EasyCut.ViewModels
             }
 
             var dir = SelectedTask.OutputDirectory;
-            if (System.IO.Directory.Exists(dir))
+            if (Directory.Exists(dir))
             {
                 Process.Start(new ProcessStartInfo
                 {
