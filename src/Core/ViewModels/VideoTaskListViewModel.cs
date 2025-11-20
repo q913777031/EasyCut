@@ -9,6 +9,9 @@ using EasyCut.Models;
 using EasyCut.Services;
 using Prism.Commands;
 using Prism.Mvvm;
+using EasyCut.Views;
+using Microsoft.Win32;
+using System.IO;
 
 namespace EasyCut.ViewModels
 {
@@ -69,30 +72,36 @@ namespace EasyCut.ViewModels
         /// </summary>
         private async void OnNewTask()
         {
-            var dlg = new Microsoft.Win32.OpenFileDialog
+            var dlg = new OpenFileDialog
             {
                 Filter = "视频文件|*.mp4;*.mkv;*.mov;*.avi|所有文件|*.*"
             };
             if (dlg.ShowDialog() != true)
+                return;
+
+            string videoPath = dlg.FileName;
+            string outputDir = Path.Combine(
+                Path.GetDirectoryName(videoPath)!,
+                "EasyCutOutput");
+
+            Directory.CreateDirectory(outputDir);
+
+            // ① 先让用户可视化选择片段
+            if (!SegmentSelectionDialog.TrySelectSegment(videoPath, out var clipStart, out var clipEnd))
             {
+                // 用户点击了“取消”
                 return;
             }
 
-            var videoPath = dlg.FileName;
-            var outputDir = System.IO.Path.Combine(
-                System.IO.Path.GetDirectoryName(videoPath)!,
-                "EasyCutOutput");
-
-            System.IO.Directory.CreateDirectory(outputDir);
-
-            // 1. 只创建任务，不执行。
+            // ② 创建任务，并把手工片段写到任务里
             var task = await _coordinator.CreateTaskAsync(videoPath, outputDir);
+            task.ClipStartSeconds = clipStart;
+            task.ClipEndSeconds = clipEnd;
 
-            // 2. 立即加入列表，让 UI 立刻看到一行任务。
             Tasks.Add(task);
             SelectedTask = task;
 
-            // 3. 后台执行任务，过程中任务对象会不断更新进度和阶段。
+            // ③ 后台执行任务（流程里会优先使用 ClipStart/End）
             _ = _coordinator.RunTaskAsync(task.Id)
                 .ContinueWith(t =>
                 {

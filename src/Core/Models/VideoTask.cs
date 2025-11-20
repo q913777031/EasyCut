@@ -125,6 +125,16 @@ namespace EasyCut.Models
                 VideoTaskPhase.Failed => "失败",
                 _ => "未知"
             };
+
+        /// <summary>
+        /// 手动选择的片段开始时间（秒）。为空表示使用自动选择。
+        /// </summary>
+        public double? ClipStartSeconds { get; set; }
+
+        /// <summary>
+        /// 手动选择的片段结束时间（秒）。
+        /// </summary>
+        public double? ClipEndSeconds { get; set; }
     }
 
     /// <summary>

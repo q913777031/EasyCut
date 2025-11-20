@@ -174,15 +174,39 @@ namespace EasyCut.Services
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 3. 解析字幕并自动选取一段适合学习的片段
+                // 3. 解析字幕并选择片段（优先使用手工片段）
                 var subtitles = SrtHelper.Parse(englishFullSrtPath);
 
-                var (clipStartSec, clipEndSec) = SrtHelper.PickBestSegment(
-        subtitles,
-        totalDurationSeconds: totalDuration,
-        minDuration: 4.0,
-        maxDuration: totalDuration, // 几乎不限制
-        targetDuration: totalDuration / 10.0); // 比如“整段的 1/10”当作理想长度
+                double clipStartSec;
+                double clipEndSec;
+
+                if (task.ClipStartSeconds.HasValue && task.ClipEndSeconds.HasValue)
+                {
+                    // 手工选择的片段
+                    clipStartSec = Math.Max(0, task.ClipStartSeconds.Value);
+                    clipEndSec = Math.Min(totalDuration, task.ClipEndSeconds.Value);
+
+                    // 太短或不合法时，自动兜底
+                    if (clipEndSec <= clipStartSec + 0.1)
+                    {
+                        (clipStartSec, clipEndSec) = SrtHelper.PickBestSegment(
+                            subtitles,
+                            totalDurationSeconds: totalDuration,
+                            minDuration: 4.0,
+                            maxDuration: Math.Min(totalDuration, 45.0),
+                            targetDuration: 18.0);
+                    }
+                }
+                else
+                {
+                    // 没有手工片段，就用自动规则
+                    (clipStartSec, clipEndSec) = SrtHelper.PickBestSegment(
+                        subtitles,
+                        totalDurationSeconds: totalDuration,
+                        minDuration: 4.0,
+                        maxDuration: Math.Min(totalDuration, 45.0),
+                        targetDuration: 18.0);
+                }
 
                 UpdateOnUiThread(task, t =>
                 {
@@ -191,8 +215,6 @@ namespace EasyCut.Services
                     t.UpdatedTime = DateTime.Now;
                 });
                 await _repository.UpdateAsync(task).ConfigureAwait(false);
-
-                cancellationToken.ThrowIfCancellationRequested();
 
                 // 4. 按选取的时间范围从原视频截取基础片段
                 var baseSegments = new List<SegmentConfig>
